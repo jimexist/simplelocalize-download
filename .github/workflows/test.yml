@@ -16,6 +16,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Ruff (lint + format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      # Ruff needs no compiled extension, so skip the Rust build entirely and
+      # run the version pinned in uv.lock for reproducibility.
+      - name: Ruff lint
+        run: uvx ruff@0.15.20 check
+      - name: Ruff format
+        run: uvx ruff@0.15.20 format --check
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
@@ -59,10 +72,6 @@ jobs:
         run: uv sync
       - name: Build extension in place
         run: uv run maturin develop
-      - name: Ruff lint
-        run: uv run ruff check
-      - name: Ruff format
-        run: uv run ruff format --check
       - name: Mypy
         run: |
           uv run mypy
