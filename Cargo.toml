@@ -1,6 +1,6 @@
 [package]
 name = "simplelocalize-download"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Resilient Rust port of the SimpleLocalize CLI download command, with Python bindings"
 license = "MIT"
