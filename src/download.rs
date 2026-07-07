@@ -96,7 +96,7 @@ fn emit(callback: &Option<ProgressCallback>, event: DownloadEvent) {
 /// returned [`DownloadReport`]; callers decide whether a non-empty
 /// `report.failed` should be treated as an error.
 pub async fn download(
-    config: DownloadConfig,
+    mut config: DownloadConfig,
     on_event: Option<ProgressCallback>,
 ) -> Result<DownloadReport, Error> {
     let client = ApiClient::new(ApiClientConfig {
@@ -105,6 +105,12 @@ pub async fn download(
         request_timeout: config.request_timeout,
         retry: config.retry.clone(),
     })?;
+
+    // Mirror the official CLI: the API only splits the export by language /
+    // namespace / customer when asked to. Derive those `SPLIT_BY_*` options from
+    // the placeholders in the path template, otherwise the server returns a
+    // single bundled file with null metadata and `{lang}` / `{ns}` render empty.
+    apply_split_options(&mut config.request.options, &config.download_path);
 
     let files = client.list_download_files(&config.request).await?;
     Ok(download_all(
@@ -115,6 +121,22 @@ pub async fn download(
         on_event,
     )
     .await)
+}
+
+/// Add `SPLIT_BY_LANGUAGES` / `SPLIT_BY_NAMESPACES` / `SPLIT_BY_CUSTOMERS` to
+/// `options` for each corresponding placeholder present in the path template,
+/// skipping any the caller already supplied.
+fn apply_split_options(options: &mut Vec<String>, template: &str) {
+    const RULES: [(&str, &str); 3] = [
+        ("{lang}", "SPLIT_BY_LANGUAGES"),
+        ("{ns}", "SPLIT_BY_NAMESPACES"),
+        ("{customer}", "SPLIT_BY_CUSTOMERS"),
+    ];
+    for (placeholder, option) in RULES {
+        if template.contains(placeholder) && !options.iter().any(|o| o == option) {
+            options.push(option.to_string());
+        }
+    }
 }
 
 async fn download_all(
@@ -319,6 +341,31 @@ mod tests {
     use tokio::time::Instant;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn split_options_derived_from_placeholders() {
+        let mut options = vec![];
+        apply_split_options(&mut options, "./json/{lang}/{ns}.json");
+        assert_eq!(options, vec!["SPLIT_BY_LANGUAGES", "SPLIT_BY_NAMESPACES"]);
+    }
+
+    #[test]
+    fn split_options_preserve_existing_and_dedupe() {
+        let mut options = vec!["WRITE_NESTED".to_string(), "SPLIT_BY_LANGUAGES".to_string()];
+        apply_split_options(&mut options, "./{customer}/{lang}/app.json");
+        // Existing options kept, no duplicate SPLIT_BY_LANGUAGES, customer added.
+        assert_eq!(
+            options,
+            vec!["WRITE_NESTED", "SPLIT_BY_LANGUAGES", "SPLIT_BY_CUSTOMERS"]
+        );
+    }
+
+    #[test]
+    fn split_options_noop_without_placeholders() {
+        let mut options = vec!["WRITE_NESTED".to_string()];
+        apply_split_options(&mut options, "./messages.json");
+        assert_eq!(options, vec!["WRITE_NESTED"]);
+    }
 
     fn fast_retry() -> RetryPolicy {
         RetryPolicy {
