@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = "0.29.0"
+pyo3-log = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "time", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
