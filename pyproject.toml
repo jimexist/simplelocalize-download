@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "simplelocalize-download"
 description = "Resilient Rust-powered port of the SimpleLocalize CLI download command, with a Python library and Typer CLI."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Jiayu Liu" }]
 classifiers = [
@@ -36,7 +36,6 @@ dev = [
     "pytest>=8",
     "mypy>=1.10",
     "ruff>=0.6",
-    "tomli>=2; python_version < '3.11'",
 ]
 
 [tool.maturin]
@@ -56,7 +55,7 @@ src = ["python", "tests"]
 select = ["E", "F", "I", "UP", "B", "W"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 files = ["python"]
 
