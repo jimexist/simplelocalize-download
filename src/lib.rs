@@ -1,13 +1,15 @@
+//! Rust core for `simplelocalize-download`.
+//!
+//! The compiled extension module is exposed to Python as
+//! `simplelocalize_download._core`. Feature work (API client, download engine,
+//! bindings) lands in later modules; this scaffold only establishes the module
+//! boundary and surfaces the crate version.
+
 use pyo3::prelude::*;
 
-/// A Python module implemented in Rust.
+/// The `_core` extension module.
 #[pymodule]
-mod simplelocalize_download {
-    use pyo3::prelude::*;
-
-    /// Formats the sum of two numbers as string.
-    #[pyfunction]
-    fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-        Ok((a + b).to_string())
-    }
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    Ok(())
 }

@@ -4,10 +4,57 @@ build-backend = "maturin"
 
 [project]
 name = "simplelocalize-download"
-requires-python = ">=3.8"
+description = "Resilient Rust-powered port of the SimpleLocalize CLI download command, with a Python library and Typer CLI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jiayu Liu" }]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3 :: Only",
+    "Environment :: Console",
+    "Topic :: Software Development :: Localization",
+]
+dependencies = [
+    "typer>=0.12",
+    "loguru>=0.7",
+    "rich>=13",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/jimexist/simplelocalize-download"
+Issues = "https://github.com/jimexist/simplelocalize-download/issues"
+
+[project.scripts]
+simplelocalize-download = "simplelocalize_download.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "mypy>=1.10",
+    "ruff>=0.6",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "simplelocalize_download._core"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 100
+src = ["python", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["python"]
+
+[[tool.mypy.overrides]]
+# The compiled extension is described by _core.pyi; no runtime stubs to follow.
+module = "simplelocalize_download._core"
+ignore_missing_imports = true
