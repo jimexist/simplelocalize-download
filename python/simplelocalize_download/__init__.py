@@ -7,6 +7,28 @@ public surface; the Typer CLI lives in :mod:`simplelocalize_download.cli`.
 
 from __future__ import annotations
 
-from ._core import __version__
+from ._core import (
+    ApiError,
+    AuthError,
+    DownloadedFile,
+    DownloadFailedError,
+    DownloadReport,
+    FailedFile,
+    NetworkError,
+    SimpleLocalizeError,
+    __version__,
+    download,
+)
 
-__all__ = ["__version__"]
+__all__ = [
+    "ApiError",
+    "AuthError",
+    "DownloadFailedError",
+    "DownloadReport",
+    "DownloadedFile",
+    "FailedFile",
+    "NetworkError",
+    "SimpleLocalizeError",
+    "__version__",
+    "download",
+]
