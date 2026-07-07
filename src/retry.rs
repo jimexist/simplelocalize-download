@@ -1,21 +1,20 @@
-//! Generic exponential-backoff retry helper shared by the API client and the
-//! download engine.
+//! Retry policy for the API client and download engine.
 //!
-//! The operation returns an [`Attempt`], distinguishing success, a retryable
-//! failure (optionally carrying a server-suggested `Retry-After`), and a fatal
-//! failure. Backoff uses full jitter; a server `Retry-After` overrides it.
+//! The actual retry loop is provided by the [`backon`] crate. This module holds
+//! the tunable [`RetryPolicy`] and maps it to a [`backon::ExponentialBuilder`]
+//! (capped exponential backoff with jitter). Which errors are retryable — and
+//! any server-suggested `Retry-After` — is decided by [`crate::error::Error`].
 
-use std::future::Future;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use crate::error::Error;
+use backon::ExponentialBuilder;
 
 /// Backoff configuration.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (including the first).
     pub max_attempts: u32,
-    /// Delay for the first retry, doubled (by `factor`) each subsequent retry.
+    /// Delay for the first retry, grown by `factor` each subsequent retry.
     pub base_delay: Duration,
     /// Upper bound on any single backoff delay.
     pub max_delay: Duration,
@@ -34,119 +33,74 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Outcome of a single attempt.
-pub enum Attempt<T> {
-    /// Success.
-    Done(T),
-    /// Retryable failure; `retry_after` overrides computed backoff when set.
-    Retry {
-        error: Error,
-        retry_after: Option<Duration>,
-    },
-    /// Permanent failure — do not retry.
-    Fatal(Error),
-}
-
-/// Cheap thread-local xorshift PRNG for jitter (no external dependency).
-fn rand_u64() -> u64 {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = Cell::new(seed());
-    }
-    fn seed() -> u64 {
-        let nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15);
-        nanos | 1
-    }
-    STATE.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        x
-    })
-}
-
-/// Full-jitter backoff delay for the given retry index (0-based).
-fn backoff_delay(policy: &RetryPolicy, retry_index: u32) -> Duration {
-    let factor_pow = u64::from(policy.factor).saturating_pow(retry_index);
-    let base_ms = policy.base_delay.as_millis() as u64;
-    let uncapped = base_ms.saturating_mul(factor_pow);
-    let cap = (policy.max_delay.as_millis() as u64).max(1);
-    let ceiling = uncapped.min(cap).max(1);
-    // Full jitter: uniform in [0, ceiling].
-    Duration::from_millis(rand_u64() % (ceiling + 1))
-}
-
-/// Run `op`, retrying retryable failures per `policy`.
-pub async fn retry<T, F, Fut>(policy: &RetryPolicy, mut op: F) -> Result<T, Error>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Attempt<T>>,
-{
-    let mut attempt: u32 = 0;
-    loop {
-        match op().await {
-            Attempt::Done(value) => return Ok(value),
-            Attempt::Fatal(error) => return Err(error),
-            Attempt::Retry { error, retry_after } => {
-                attempt += 1;
-                if attempt >= policy.max_attempts {
-                    log::debug!("giving up after {attempt} attempt(s): {error}");
-                    return Err(error);
-                }
-                let delay = retry_after.unwrap_or_else(|| backoff_delay(policy, attempt - 1));
-                log::debug!(
-                    "retryable error (attempt {attempt}/{}), backing off {delay:?}: {error}",
-                    policy.max_attempts
-                );
-                tokio::time::sleep(delay).await;
-            }
-        }
+impl RetryPolicy {
+    /// Backoff builder for `backon`. `backon` counts *retries*, so the number of
+    /// retries is `max_attempts - 1` (the first call is not a retry).
+    pub fn builder(&self) -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(self.base_delay)
+            .with_max_delay(self.max_delay)
+            .with_factor(self.factor as f32)
+            .with_max_times(self.max_attempts.saturating_sub(1) as usize)
+            .with_jitter()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
+    use backon::Retryable;
     use std::cell::Cell;
+
+    fn retryable(status: u16) -> Error {
+        Error::Api {
+            status,
+            msg: "boom".into(),
+            retry_after: None,
+        }
+    }
+
+    fn fast_policy(max_attempts: u32) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            factor: 2,
+        }
+    }
 
     #[tokio::test]
     async fn succeeds_first_try() {
-        let policy = RetryPolicy::default();
-        let out = retry(&policy, || async { Attempt::Done(42) })
-            .await
-            .unwrap();
+        let calls = Cell::new(0u32);
+        let out = (|| {
+            calls.set(calls.get() + 1);
+            async { Ok::<u32, Error>(42) }
+        })
+        .retry(fast_policy(5).builder())
+        .when(Error::is_retryable)
+        .await
+        .unwrap();
         assert_eq!(out, 42);
+        assert_eq!(calls.get(), 1);
     }
 
     #[tokio::test]
     async fn retries_then_succeeds() {
-        let policy = RetryPolicy {
-            max_attempts: 5,
-            base_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(2),
-            factor: 2,
-        };
         let calls = Cell::new(0u32);
-        let out = retry(&policy, || async {
+        let out = (|| {
             let n = calls.get() + 1;
             calls.set(n);
-            if n < 3 {
-                Attempt::Retry {
-                    error: Error::Api {
-                        status: 503,
-                        msg: "busy".into(),
-                    },
-                    retry_after: None,
+            async move {
+                if n < 3 {
+                    Err(retryable(503))
+                } else {
+                    Ok(n)
                 }
-            } else {
-                Attempt::Done(n)
             }
         })
+        .retry(fast_policy(5).builder())
+        .when(Error::is_retryable)
         .await
         .unwrap();
         assert_eq!(out, 3);
@@ -155,40 +109,34 @@ mod tests {
 
     #[tokio::test]
     async fn exhausts_attempts() {
-        let policy = RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(2),
-            factor: 2,
-        };
         let calls = Cell::new(0u32);
-        let err = retry(&policy, || async {
+        let err = (|| {
             calls.set(calls.get() + 1);
-            Attempt::<()>::Retry {
-                error: Error::Api {
-                    status: 500,
-                    msg: "boom".into(),
-                },
-                retry_after: None,
-            }
+            async { Err::<(), _>(retryable(500)) }
         })
+        .retry(fast_policy(3).builder())
+        .when(Error::is_retryable)
         .await
         .unwrap_err();
+        // max_attempts = 3 → the first call plus 2 retries.
         assert_eq!(calls.get(), 3);
         assert_eq!(err.status(), Some(500));
     }
 
     #[tokio::test]
-    async fn fatal_does_not_retry() {
-        let policy = RetryPolicy::default();
+    async fn non_retryable_is_not_retried() {
         let calls = Cell::new(0u32);
-        let err = retry(&policy, || async {
+        let err = (|| {
             calls.set(calls.get() + 1);
-            Attempt::<()>::Fatal(Error::Auth {
-                status: 401,
-                msg: "nope".into(),
-            })
+            async {
+                Err::<(), _>(Error::Auth {
+                    status: 401,
+                    msg: "nope".into(),
+                })
+            }
         })
+        .retry(fast_policy(5).builder())
+        .when(Error::is_retryable)
         .await
         .unwrap_err();
         assert_eq!(calls.get(), 1);

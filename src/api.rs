@@ -2,12 +2,13 @@
 
 use std::time::Duration;
 
+use backon::Retryable;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{Client, Response, StatusCode};
 
 use crate::error::Error;
 use crate::model::{DownloadListResponse, DownloadRequest, DownloadableFile};
-use crate::retry::{Attempt, RetryPolicy, retry};
+use crate::retry::RetryPolicy;
 
 /// Default SimpleLocalize API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.simplelocalize.io";
@@ -86,73 +87,59 @@ impl ApiClient {
         let url = format!("{}/cli/v2/download", self.base_url.trim_end_matches('/'));
         let query = build_query(req);
         log::debug!("listing download files: {url}");
-        retry(&self.retry, || self.list_once(&url, &query)).await
+        (|| self.list_once(&url, &query))
+            .retry(self.retry.builder())
+            .when(Error::is_retryable)
+            // Honor a server `Retry-After`, falling back to the computed backoff.
+            .adjust(|err, dur| err.retry_after().or(dur))
+            .notify(|err, dur| {
+                log::debug!("retryable error, backing off {dur:?}: {err}");
+            })
+            .await
     }
 
     async fn list_once(
         &self,
         url: &str,
         query: &[(&'static str, String)],
-    ) -> Attempt<Vec<DownloadableFile>> {
-        let sent = self
+    ) -> Result<Vec<DownloadableFile>, Error> {
+        let resp = self
             .http
             .get(url)
             .query(query)
             .header(TOKEN_HEADER, &self.api_key)
             .header(VERSION_HEADER, CLI_VERSION)
             .send()
-            .await;
-
-        let resp = match sent {
-            Ok(resp) => resp,
-            Err(err) => return classify_transport_error(err),
-        };
+            .await?;
 
         let status = resp.status();
         if status.is_success() {
-            return match resp.json::<DownloadListResponse>().await {
-                Ok(body) => Attempt::Done(body.files),
-                Err(err) => {
-                    Attempt::Fatal(Error::InvalidResponse(format!("failed to decode: {err}")))
-                }
-            };
+            return resp
+                .json::<DownloadListResponse>()
+                .await
+                .map(|body| body.files)
+                .map_err(|err| Error::InvalidResponse(format!("failed to decode: {err}")));
         }
 
         let retry_after = parse_retry_after(resp.headers());
         let msg = extract_error_message(resp).await;
-        classify_status(status, msg, retry_after)
+        Err(classify_status(status, msg, retry_after))
     }
 }
 
-/// A transport error (connect/timeout) is retryable; anything else is fatal.
-fn classify_transport_error<T>(err: reqwest::Error) -> Attempt<T> {
-    if err.is_timeout() || err.is_connect() {
-        Attempt::Retry {
-            error: Error::Network(err),
-            retry_after: None,
-        }
-    } else {
-        Attempt::Fatal(Error::Network(err))
-    }
-}
-
-/// Map a non-success HTTP status to an [`Attempt`]: 401/403 fatal auth,
-/// 429/5xx retryable, other 4xx fatal.
-fn classify_status<T>(
-    status: StatusCode,
-    msg: String,
-    retry_after: Option<Duration>,
-) -> Attempt<T> {
+/// Map a non-success HTTP status to an [`Error`]: 401/403 auth, everything else
+/// an API error. Whether the caller retries is decided by [`Error::is_retryable`]
+/// (429/5xx retryable, other 4xx permanent).
+fn classify_status(status: StatusCode, msg: String, retry_after: Option<Duration>) -> Error {
     let code = status.as_u16();
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        Attempt::Fatal(Error::Auth { status: code, msg })
-    } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        Attempt::Retry {
-            error: Error::Api { status: code, msg },
+        Error::Auth { status: code, msg }
+    } else {
+        Error::Api {
+            status: code,
+            msg,
             retry_after,
         }
-    } else {
-        Attempt::Fatal(Error::Api { status: code, msg })
     }
 }
 
@@ -337,7 +324,7 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            Error::Api { status: 400, msg } => assert_eq!(msg, "Unknown download format"),
+            Error::Api { status: 400, msg, .. } => assert_eq!(msg, "Unknown download format"),
             other => panic!("expected Api error, got {other:?}"),
         }
     }
