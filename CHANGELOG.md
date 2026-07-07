@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Derive `SPLIT_BY_LANGUAGES` / `SPLIT_BY_NAMESPACES` / `SPLIT_BY_CUSTOMERS` download options from
+  the `{lang}` / `{ns}` / `{customer}` placeholders in the download path, matching the official CLI.
+  Without them the API returns a single bundled file with null metadata, so the placeholders rendered
+  empty (e.g. `json/.json`).
+
 ## [0.1.0]
 
 Initial release: a resilient Rust port of the SimpleLocalize CLI `download` command with Python
