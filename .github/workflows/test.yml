@@ -40,7 +40,7 @@ jobs:
       # only enabled by maturin), so a Python with a shared lib must be present.
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
