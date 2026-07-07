@@ -91,13 +91,7 @@ mod tests {
         let out = (|| {
             let n = calls.get() + 1;
             calls.set(n);
-            async move {
-                if n < 3 {
-                    Err(retryable(503))
-                } else {
-                    Ok(n)
-                }
-            }
+            async move { if n < 3 { Err(retryable(503)) } else { Ok(n) } }
         })
         .retry(fast_policy(5).builder())
         .when(Error::is_retryable)

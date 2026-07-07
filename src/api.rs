@@ -324,7 +324,9 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            Error::Api { status: 400, msg, .. } => assert_eq!(msg, "Unknown download format"),
+            Error::Api {
+                status: 400, msg, ..
+            } => assert_eq!(msg, "Unknown download format"),
             other => panic!("expected Api error, got {other:?}"),
         }
     }
