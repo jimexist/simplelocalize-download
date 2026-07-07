@@ -18,6 +18,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  # Don't cancel release builds triggered by tag pushes.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
