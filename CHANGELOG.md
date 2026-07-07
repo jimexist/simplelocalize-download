@@ -6,12 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Changed
+
+- Require Python 3.11 or newer; Python 3.10 is no longer supported.
+
 ### Fixed
 
 - Derive `SPLIT_BY_LANGUAGES` / `SPLIT_BY_NAMESPACES` / `SPLIT_BY_CUSTOMERS` download options from
   the `{lang}` / `{ns}` / `{customer}` placeholders in the download path, matching the official CLI.
   Without them the API returns a single bundled file with null metadata, so the placeholders rendered
   empty (e.g. `json/.json`).
+
+### Internal
+
+- CI: run `ruff` in a dedicated fast lint job, cancel outdated concurrent runs, and fix `rustfmt`
+  formatting.
+- CI and dev env: align Python pins to 3.14.
 
 ## [0.1.0]
 
@@ -33,5 +45,6 @@ bindings and a Typer CLI.
 - Supports the `download` command with the `single-language-json` format only. See the README for
   the full list of what is intentionally out of scope.
 
-[Unreleased]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jimexist/simplelocalize-download/releases/tag/v0.1.0
