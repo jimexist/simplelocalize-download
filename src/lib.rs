@@ -1,9 +1,14 @@
 //! Rust core for `simplelocalize-download`.
 //!
 //! The compiled extension module is exposed to Python as
-//! `simplelocalize_download._core`. Feature work (API client, download engine,
-//! bindings) lands in later modules; this scaffold only establishes the module
-//! boundary and surfaces the crate version.
+//! `simplelocalize_download._core`. Feature work (download engine, bindings)
+//! lands in later modules; this crate currently provides the API client and the
+//! module boundary.
+
+pub mod api;
+pub mod error;
+pub mod model;
+pub mod retry;
 
 use pyo3::prelude::*;
 
