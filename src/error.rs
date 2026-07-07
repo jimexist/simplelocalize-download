@@ -30,6 +30,15 @@ pub enum Error {
     /// The response could not be parsed into the expected shape.
     #[error("invalid response from server: {0}")]
     InvalidResponse(String),
+
+    /// A local filesystem error while writing a downloaded file.
+    #[error("I/O error at {path}: {message}")]
+    Io { path: String, message: String },
+
+    /// A resolved output path would escape the download base directory, or is
+    /// otherwise unusable.
+    #[error("unsafe output path: {0}")]
+    UnsafePath(String),
 }
 
 impl Error {
@@ -42,13 +51,17 @@ impl Error {
     }
 
     /// Whether retrying the operation might succeed: transient transport
-    /// failures (connect/timeout) and rate-limit/server statuses (429/5xx).
-    /// Auth failures, other 4xx, and decode failures are permanent.
+    /// failures (connect/timeout, or a body interrupted mid-stream) and
+    /// rate-limit/server statuses (429/5xx). Auth failures, other 4xx, decode
+    /// failures, and local I/O/path errors are permanent.
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Api { status, .. } => *status == 429 || (500..600).contains(status),
-            Error::Network(err) => err.is_timeout() || err.is_connect(),
-            Error::Auth { .. } | Error::InvalidResponse(_) => false,
+            Error::Network(err) => err.is_timeout() || err.is_connect() || err.is_body(),
+            Error::Auth { .. }
+            | Error::InvalidResponse(_)
+            | Error::Io { .. }
+            | Error::UnsafePath(_) => false,
         }
     }
 
@@ -57,6 +70,14 @@ impl Error {
         match self {
             Error::Api { retry_after, .. } => *retry_after,
             _ => None,
+        }
+    }
+
+    /// Build an [`Error::Io`] from a path and a [`std::io::Error`].
+    pub fn io(path: &std::path::Path, err: std::io::Error) -> Self {
+        Error::Io {
+            path: path.display().to_string(),
+            message: err.to_string(),
         }
     }
 }
