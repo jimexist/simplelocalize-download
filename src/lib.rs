@@ -6,9 +6,11 @@
 //! module boundary.
 
 pub mod api;
+pub mod download;
 pub mod error;
 pub mod model;
 pub mod retry;
+pub mod template;
 
 use pyo3::prelude::*;
 

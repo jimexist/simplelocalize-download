@@ -143,7 +143,7 @@ fn classify_status(status: StatusCode, msg: String, retry_after: Option<Duration
     }
 }
 
-fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
