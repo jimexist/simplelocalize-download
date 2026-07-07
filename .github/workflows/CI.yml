@@ -48,6 +48,9 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
+          # ring's ARM assembly requires __ARM_ARCH, which the manylinux
+          # cross-gcc doesn't define. See https://github.com/briansmith/ring/issues/1728
+          docker-options: -e CFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8 -e CFLAGS_armv7_unknown_linux_gnueabihf=-D__ARM_ARCH=7
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -79,6 +82,9 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
+          # ring's ARM assembly requires __ARM_ARCH, which the manylinux
+          # cross-gcc doesn't define. See https://github.com/briansmith/ring/issues/1728
+          docker-options: -e CFLAGS_aarch64_unknown_linux_gnu=-D__ARM_ARCH=8 -e CFLAGS_armv7_unknown_linux_gnueabihf=-D__ARM_ARCH=7
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
