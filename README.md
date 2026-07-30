@@ -109,10 +109,12 @@ Exceptions: `SimpleLocalizeError` (base) → `AuthError` (has `.status`), `ApiEr
   reach twice the ceiling), enough to ride out a short SimpleLocalize outage unattended; tune it with
   the `--retry-*` flags. Each retry logs at `warn`, so an unattended run shows what was retried
   rather than only the final failure.
-- **Per-file cost**: the same budget applies to each file's download, and files are fetched
-  `--concurrency` at a time. A persistent failure across a large batch costs roughly
-  `(files / concurrency) x per-file budget`, so lower `--retry-attempts` for very large batches
-  where a fast overall failure matters more than surviving a blip.
+- **Per-file budget is tighter than the list call's.** The list call is one request, so it can afford
+  to be patient; each *file* pays its own budget and only `--concurrency` files run at a time, so the
+  same budget would multiply by `(files / concurrency)`. File downloads therefore use half the
+  attempts (minimum 3) and a 5s delay ceiling, keeping a batch-wide outage to minutes instead of
+  hours. A file that exhausts its retries is reported in the summary and exits 5; it never aborts the
+  rest of the batch.
 - **Atomic writes**: each file streams to a temp file in the destination directory and is renamed
   into place, so a crash never leaves a half-written translation file.
 - **Partial-failure reporting**: a failed file doesn't abort the batch; every file is attempted and

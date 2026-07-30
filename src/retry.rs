@@ -27,15 +27,22 @@ pub struct RetryPolicy {
 /// sums to 91s (1 + 2 + 4 + 8 + 16 + 30 + 30) before giving up — 91-182s once
 /// `backon`'s additive jitter is included (see [`RetryPolicy::builder`]).
 ///
-/// Note this budget is per *operation*: the list call pays it once, but each file
-/// download pays it too, and files run [`crate::download::DEFAULT_CONCURRENCY`] at
-/// a time — so a persistent failure over a large batch costs roughly
-/// `(files / concurrency) * budget`.
+/// This is the budget for a *single* operation. The list call pays it once, so it
+/// can afford to be patient; per-file downloads pay it once each and run only
+/// [`crate::download::DEFAULT_CONCURRENCY`] at a time, so they use the tightened
+/// budget from [`RetryPolicy::for_file_downloads`] instead.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 8;
 /// Default delay before the first retry.
 pub const DEFAULT_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Default ceiling on any single backoff delay.
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Floor on attempts for an individual file, so tightening never removes retries
+/// altogether (one retry is what recovers the common single transient blip).
+const MIN_FILE_ATTEMPTS: u32 = 3;
+/// Ceiling on a single per-file backoff delay. Much lower than
+/// [`DEFAULT_MAX_DELAY`] because this delay is paid once per file, not once total.
+const FILE_MAX_DELAY: Duration = Duration::from_secs(5);
 
 impl Default for RetryPolicy {
     fn default() -> Self {
@@ -67,6 +74,31 @@ impl RetryPolicy {
             base_delay,
             max_delay: max_delay.unwrap_or(DEFAULT_MAX_DELAY).max(base_delay),
             factor: factor.unwrap_or(2).max(1),
+        }
+    }
+
+    /// A tightened copy of this policy for individual file downloads.
+    ///
+    /// The list call is one request, so spending the full budget on it costs that
+    /// budget once. A file download pays it *per file*, with only
+    /// [`crate::download::DEFAULT_CONCURRENCY`] running at a time, so the same
+    /// budget multiplies: a persistent failure across `n` files costs roughly
+    /// `(n / concurrency) * budget`. For the real consumer shape (~460 files at
+    /// concurrency 8) the untightened default would mean hours of retrying before
+    /// the run gave up, versus minutes for the list call.
+    ///
+    /// Halving the attempts and capping the delay at [`FILE_MAX_DELAY`] keeps that
+    /// bounded. Per-file resilience matters less than it looks: a file that
+    /// exhausts its retries is collected into [`crate::download::DownloadReport`]
+    /// and reported, whereas a failed list call aborts the whole run.
+    pub fn for_file_downloads(&self) -> Self {
+        Self {
+            max_attempts: (self.max_attempts / 2).max(MIN_FILE_ATTEMPTS),
+            base_delay: self.base_delay,
+            // `.max(base_delay)` preserves the invariant `from_overrides` enforces:
+            // a ceiling below the base delay would shorten the first retry.
+            max_delay: self.max_delay.min(FILE_MAX_DELAY).max(self.base_delay),
+            factor: self.factor,
         }
     }
 
@@ -165,6 +197,44 @@ mod tests {
             total >= Duration::from_secs(91) && total < Duration::from_secs(182),
             "total backoff {total:?} outside the documented [91s, 182s) envelope"
         );
+    }
+
+    #[test]
+    fn per_file_budget_is_tighter_than_the_operation_budget() {
+        let policy = RetryPolicy::default();
+        let per_file = policy.for_file_downloads();
+
+        assert_eq!(per_file.max_attempts, 4); // 8 / 2
+        assert_eq!(per_file.max_delay, FILE_MAX_DELAY);
+        assert_eq!(per_file.base_delay, policy.base_delay);
+
+        // The point of the tightening: worst-case cost across a large batch. For
+        // the real consumer shape (~460 files at concurrency 8) the un-jittered
+        // per-file budget must stay in minutes, not hours.
+        let per_file_total: Duration = per_file.builder().build().sum();
+        let waves = 460u32.div_ceil(crate::download::DEFAULT_CONCURRENCY as u32);
+        assert!(
+            per_file_total * waves < Duration::from_secs(20 * 60),
+            "per-file budget {per_file_total:?} x {waves} waves is too slow to fail"
+        );
+    }
+
+    #[test]
+    fn per_file_budget_keeps_a_floor_and_respects_base_delay() {
+        // Halving must not retry-once-or-never.
+        let tiny = RetryPolicy::from_overrides(Some(2), None, None, None);
+        assert_eq!(tiny.for_file_downloads().max_attempts, MIN_FILE_ATTEMPTS);
+
+        // A base delay above the per-file ceiling must not invert the invariant.
+        let slow = RetryPolicy::from_overrides(
+            None,
+            Some(Duration::from_secs(20)),
+            Some(Duration::from_secs(60)),
+            None,
+        );
+        let per_file = slow.for_file_downloads();
+        assert_eq!(per_file.max_delay, Duration::from_secs(20));
+        assert!(per_file.max_delay >= per_file.base_delay);
     }
 
     #[test]

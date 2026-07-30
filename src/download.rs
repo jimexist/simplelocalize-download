@@ -151,12 +151,16 @@ async fn download_all(
     log::info!("downloading {total} file(s) with concurrency {concurrency}");
 
     let concurrency = concurrency.max(1);
+    // Derived once per batch, not per file: this budget is paid by every file, so
+    // it is deliberately tighter than the client's (one-shot) list-call budget.
+    let file_retry = client.retry_policy().for_file_downloads();
     let outcomes = stream::iter(files.into_iter().map(|file| {
         let client = client.clone();
         let template = template.to_string();
         let on_event = on_event.clone();
+        let file_retry = file_retry.clone();
         async move {
-            match download_one(&client, &file, &template).await {
+            match download_one(&client, &file, &template, &file_retry).await {
                 Ok((path, bytes)) => {
                     emit(
                         &on_event,
@@ -222,6 +226,7 @@ async fn download_one(
     client: &ApiClient,
     file: &DownloadableFile,
     template: &str,
+    retry: &RetryPolicy,
 ) -> Result<(PathBuf, u64), Error> {
     let out_path = template::resolve_output_path(template, file)?;
     if let Some(parent) = out_path.parent()
@@ -235,13 +240,13 @@ async fn download_one(
     // Mirrors the list call: retries are logged at `warn` so an unattended run
     // shows that a file was retried, not just that it eventually failed.
     let attempts = AtomicU32::new(0);
-    let max_attempts = client.retry_policy().max_attempts;
-    let max_delay = client.retry_policy().max_delay;
+    let max_attempts = retry.max_attempts;
+    let max_delay = retry.max_delay;
     let result = (|| {
         attempts.fetch_add(1, Ordering::Relaxed);
         fetch_and_write(client, &file.url, &out_path)
     })
-    .retry(client.retry_policy().builder())
+    .retry(retry.builder())
     .when(Error::is_retryable)
     // Honor a server `Retry-After`, falling back to the computed backoff.
     .adjust(|err, dur| adjust_delay(err, dur, max_delay))
@@ -558,7 +563,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/files/en/down.json"))
             .respond_with(ResponseTemplate::new(503))
-            .expect(4) // matches fast_retry().max_attempts
+            // fast_retry() is 4 attempts, tightened to the 3-attempt per-file floor.
+            .expect(3)
             .mount(&server)
             .await;
 
@@ -576,11 +582,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         mount_list(&server, &[("en", "slow")]).await;
         // A `Retry-After` must adjust the delay, never resurrect an exhausted
-        // budget — `expect(4)` fails if the file retries more than max_attempts.
+        // budget — the `expect` below fails if the file retries beyond its budget.
         Mock::given(method("GET"))
             .and(path("/files/en/slow.json"))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
-            .expect(4)
+            .expect(3)
             .mount(&server)
             .await;
 

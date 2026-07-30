@@ -18,9 +18,11 @@ All notable changes to this project are documented here. The format is based on
 
 - Raise the default retry budget from 5 attempts / 250ms base / 10s ceiling to 8 attempts / 1s base /
   30s ceiling. The old defaults spent only ~3.75s of total backoff, so a SimpleLocalize 503 lasting
-  more than a few seconds exhausted the retries and failed the run. Note this budget is per
-  operation: each file download pays it as well as the list call, so a persistent failure over a
-  large batch costs roughly `(files / concurrency) x budget`.
+  more than a few seconds exhausted the retries and failed the run.
+- Individual file downloads now use a tighter budget than the list call (half the attempts, minimum 3,
+  and a 5s delay ceiling). The list call is one request, but each file pays its own budget with only
+  `--concurrency` running at a time, so applying the full budget per file would multiply it by
+  `(files / concurrency)` — hours of retrying for a large batch instead of minutes.
 - Log each retry at `warn` instead of `debug`, and log a final `giving up after N attempt(s)` line on
   both the list call and each file download. Previously an unattended run showed only the terminal
   error, which read as if no retry had happened.
