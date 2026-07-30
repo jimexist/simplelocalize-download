@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- A server-supplied `Retry-After` no longer overrides the attempt budget. `backon` signals "budget
+  exhausted" by passing no delay to the backoff adjuster, and the adjuster returned the server's hint
+  regardless — so any server answering a 429/5xx with `Retry-After` retried **forever**, ignoring
+  `--retry-attempts` and hanging unattended runs. `Retry-After` is now also clamped to the delay
+  ceiling, so a server cannot decide how long a CI job sleeps.
+
+### Changed
+
+- Raise the default retry budget from 5 attempts / 250ms base / 10s ceiling to 8 attempts / 1s base /
+  30s ceiling. The old defaults spent only ~3.75s of total backoff, so a SimpleLocalize 503 lasting
+  more than a few seconds exhausted the retries and failed the run. Note this budget is per
+  operation: each file download pays it as well as the list call, so a persistent failure over a
+  large batch costs roughly `(files / concurrency) x budget`.
+- Log each retry at `warn` instead of `debug`, and log a final `giving up after N attempt(s)` line on
+  both the list call and each file download. Previously an unattended run showed only the terminal
+  error, which read as if no retry had happened.
+- An invalid `--timeout` / `--retry-*` value now exits with the usage code instead of a traceback.
+
+### Added
+
+- `--retry-attempts`, `--retry-base-delay` and `--retry-max-delay` (with `SIMPLELOCALIZE_RETRY_*`
+  environment variable equivalents) and the corresponding `retry_attempts` /
+  `retry_base_delay_secs` / `retry_max_delay_secs` arguments to `sld.download()`. The retry policy
+  was previously hardcoded with no way to tune it from Python or the CLI.
+- Retry logging for per-file downloads, which had no retry notification hook at all.
+
 ## [0.1.1]
 
 ### Changed

@@ -76,6 +76,92 @@ def test_invalid_timeout_raises_value_error(
         )
 
 
+@pytest.mark.parametrize("field", ["retry_base_delay_secs", "retry_max_delay_secs"])
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf")])
+def test_invalid_retry_delay_raises_value_error(
+    mock_server: tuple[str, MockState], tmp_path: Path, field: str, bad: float
+) -> None:
+    base, state = mock_server
+    state.add("en", "common", b"{}")
+    with pytest.raises(ValueError, match=field):
+        sld.download(
+            api_key="k",
+            download_path=_template(tmp_path),
+            base_url=base,
+            **{field: bad},
+        )
+
+
+def test_retryable_list_failure_exhausts_attempts(
+    mock_server: tuple[str, MockState], tmp_path: Path
+) -> None:
+    """A persistent 503 on the list endpoint retries, then surfaces as ApiError."""
+    base, state = mock_server
+    state.add("en", "common", b"{}")
+    state.list_status = 503
+
+    with pytest.raises(sld.ApiError) as excinfo:
+        sld.download(
+            api_key="k",
+            download_path=_template(tmp_path),
+            base_url=base,
+            retry_attempts=3,
+            retry_base_delay_secs=0.01,
+        )
+    assert excinfo.value.status == 503
+    # retry_attempts counts the first call, so 3 = initial + 2 retries.
+    assert state.list_requests == 3
+
+
+def test_retry_after_does_not_defeat_the_attempt_budget(
+    mock_server: tuple[str, MockState], tmp_path: Path
+) -> None:
+    """A server sending ``Retry-After`` must not be able to retry forever.
+
+    Regression test: the backoff adjuster returned the server's hint even when
+    backon had exhausted the budget (backon reads ``None`` as "stop"), so any
+    ``Retry-After``-sending server looped indefinitely -- logging ``attempt 9/2``
+    -- and hung unattended CI runs instead of failing.
+
+    Runs in a worker thread with a bounded join so a regression fails this test
+    instead of hanging the suite forever (the repo has no pytest-timeout).
+    """
+    base, state = mock_server
+    state.add("en", "common", b"{}")
+    state.list_status = 503
+    state.retry_after = "1"
+
+    outcome: list[Exception] = []
+
+    def run() -> None:
+        try:
+            sld.download(
+                api_key="k",
+                download_path=_template(tmp_path),
+                base_url=base,
+                retry_attempts=2,
+                retry_base_delay_secs=0.01,
+            )
+        except Exception as err:
+            # Recorded rather than raised: an exception in a worker thread would
+            # not fail the test. Re-asserted on the main thread below.
+            outcome.append(err)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+
+    assert not worker.is_alive(), (
+        f"retry loop never terminated: {state.list_requests} requests made for "
+        "retry_attempts=2 -- Retry-After is overriding the attempt budget"
+    )
+    assert state.list_requests == 2, (
+        f"budget defeated: {state.list_requests} requests for retry_attempts=2"
+    )
+    assert isinstance(outcome[0], sld.ApiError)
+    assert outcome[0].status == 503
+
+
 def test_partial_failure_raises_with_report(
     mock_server: tuple[str, MockState], tmp_path: Path
 ) -> None:

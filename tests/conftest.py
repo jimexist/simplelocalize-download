@@ -33,6 +33,10 @@ class MockState:
     """Per-file count of 500s to emit before succeeding."""
     file_delay: float = 0.0
     """Seconds to sleep before serving each file (simulate slow network)."""
+    list_requests: int = 0
+    """Number of times the list endpoint was hit (counts retries)."""
+    retry_after: str | None = None
+    """Value for a ``Retry-After`` header on error responses; None => omit."""
     base_url: str = ""
 
     def add(self, language: str, namespace: str, content: bytes) -> None:
@@ -52,6 +56,8 @@ def _make_handler(state: MockState) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if state.retry_after is not None and status >= 400:
+                self.send_header("Retry-After", state.retry_after)
             self.end_headers()
             if body:
                 self.wfile.write(body)
@@ -65,6 +71,8 @@ def _make_handler(state: MockState) -> type[BaseHTTPRequestHandler]:
                 self._send(404)
 
         def _serve_list(self) -> None:
+            with lock:
+                state.list_requests += 1
             if state.list_status != 200:
                 self._send(state.list_status, json.dumps({"msg": "list failed"}).encode())
                 return

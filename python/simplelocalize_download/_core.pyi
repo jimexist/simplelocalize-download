@@ -70,6 +70,9 @@ def download(
     base_url: str | None = ...,
     concurrency: int = ...,
     request_timeout_secs: float | None = ...,
+    retry_attempts: int | None = ...,
+    retry_base_delay_secs: float | None = ...,
+    retry_max_delay_secs: float | None = ...,
     on_event: Callable[[dict[str, Any]], None] | None = ...,
 ) -> DownloadReport:
     """Download SimpleLocalize translations (JSON only).
@@ -77,4 +80,9 @@ def download(
     Raises ``AuthError``, ``ApiError`` or ``NetworkError`` on a pre-flight
     failure, and ``DownloadFailedError`` (carrying a ``report``) when the batch
     finishes with per-file failures.
+
+    Retryable failures (HTTP 429/5xx and transient transport errors) are retried
+    with exponential backoff and jitter. The ``retry_*`` arguments override the
+    defaults (8 attempts, 1s base delay, 30s ceiling); each falls back to its
+    default when ``None``.
     """

@@ -89,7 +89,9 @@ def test_flaky_server_still_succeeds(mock_server: tuple[str, MockState], tmp_pat
     for key in all_keys[::5]:
         state.transient_failures[key] = 1
 
-    result = _invoke(tmp_path, base)
+    # Collapse the backoff: this asserts retry mechanics, not the shipped
+    # default budget (whose first retry alone waits a second).
+    result = _invoke(tmp_path, base, "--retry-base-delay", "0.01")
     assert result.exit_code == 0, result.output
     _assert_tree(tmp_path)
     assert not _tmp_litter(tmp_path)

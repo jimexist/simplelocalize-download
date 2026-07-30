@@ -1,5 +1,6 @@
 //! HTTP client for the SimpleLocalize `/cli/v2/download` endpoint.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use backon::Retryable;
@@ -8,7 +9,7 @@ use reqwest::{Client, Response, StatusCode};
 
 use crate::error::Error;
 use crate::model::{DownloadListResponse, DownloadRequest, DownloadableFile};
-use crate::retry::RetryPolicy;
+use crate::retry::{RetryPolicy, adjust_delay};
 
 /// Default SimpleLocalize API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.simplelocalize.io";
@@ -87,15 +88,37 @@ impl ApiClient {
         let url = format!("{}/cli/v2/download", self.base_url.trim_end_matches('/'));
         let query = build_query(req);
         log::debug!("listing download files: {url}");
-        (|| self.list_once(&url, &query))
-            .retry(self.retry.builder())
-            .when(Error::is_retryable)
-            // Honor a server `Retry-After`, falling back to the computed backoff.
-            .adjust(|err, dur| err.retry_after().or(dur))
-            .notify(|err, dur| {
-                log::debug!("retryable error, backing off {dur:?}: {err}");
-            })
-            .await
+        // Retries are logged at `warn` (not `debug`): when this runs unattended in
+        // CI the only visible output is the final error, which on its own reads as
+        // "no retry happened at all".
+        let attempts = AtomicU32::new(0);
+        let max_attempts = self.retry.max_attempts;
+        let max_delay = self.retry.max_delay;
+        let result = (|| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            self.list_once(&url, &query)
+        })
+        .retry(self.retry.builder())
+        .when(Error::is_retryable)
+        // Honor a server `Retry-After`, falling back to the computed backoff.
+        .adjust(|err, dur| adjust_delay(err, dur, max_delay))
+        .notify(|err, dur| {
+            log::warn!(
+                "download list attempt {}/{max_attempts} failed, retrying in {:.1}s: {err}",
+                attempts.load(Ordering::Relaxed),
+                dur.as_secs_f64(),
+            );
+        })
+        .await;
+        if let Err(err) = &result
+            && err.is_retryable()
+        {
+            log::warn!(
+                "giving up on download list after {} attempt(s): {err}",
+                attempts.load(Ordering::Relaxed),
+            );
+        }
+        result
     }
 
     async fn list_once(

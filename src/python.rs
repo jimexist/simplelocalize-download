@@ -20,8 +20,22 @@ use crate::download::{
 };
 use crate::error::Error;
 use crate::model::{DownloadFormat, DownloadRequest};
+use crate::retry::RetryPolicy;
 
 const SUPPORTED_FORMAT: &str = "single-language-json";
+
+/// Convert an optional seconds argument to a [`Duration`], rejecting negative,
+/// NaN, infinite, and overflowing values as a Python `ValueError` (rather than
+/// panicking, which would abort the interpreter).
+fn duration_arg(secs: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
+    secs.map(Duration::try_from_secs_f64)
+        .transpose()
+        .map_err(|_| {
+            PyValueError::new_err(format!(
+                "{name} must be a non-negative, finite number of seconds"
+            ))
+        })
+}
 
 create_exception!(
     _core,
@@ -176,6 +190,9 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     base_url = None,
     concurrency = DEFAULT_CONCURRENCY,
     request_timeout_secs = None,
+    retry_attempts = None,
+    retry_base_delay_secs = None,
+    retry_max_delay_secs = None,
     on_event = None,
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -193,6 +210,9 @@ fn download_py(
     base_url: Option<String>,
     concurrency: usize,
     request_timeout_secs: Option<f64>,
+    retry_attempts: Option<u32>,
+    retry_base_delay_secs: Option<f64>,
+    retry_max_delay_secs: Option<f64>,
     on_event: Option<Py<PyAny>>,
 ) -> PyResult<PyDownloadReport> {
     let format = download_format.unwrap_or_else(|| SUPPORTED_FORMAT.to_string());
@@ -202,17 +222,12 @@ fn download_py(
         )));
     }
 
-    // `Duration::try_from_secs_f64` rejects negative, NaN, infinite, and
-    // overflowing values, so an invalid timeout surfaces as a Python
-    // `ValueError` instead of panicking (which would abort the interpreter).
-    let request_timeout = request_timeout_secs
-        .map(Duration::try_from_secs_f64)
-        .transpose()
-        .map_err(|_| {
-            PyValueError::new_err(
-                "request_timeout_secs must be a non-negative, finite number of seconds",
-            )
-        })?;
+    let request_timeout = duration_arg(request_timeout_secs, "request_timeout_secs")?;
+
+    let retry_base_delay = duration_arg(retry_base_delay_secs, "retry_base_delay_secs")?;
+    let retry_max_delay = duration_arg(retry_max_delay_secs, "retry_max_delay_secs")?;
+    let retry =
+        RetryPolicy::from_overrides(retry_attempts, retry_base_delay, retry_max_delay, None);
 
     let config = DownloadConfig {
         api_key,
@@ -229,7 +244,7 @@ fn download_py(
         },
         concurrency,
         request_timeout,
-        retry: Default::default(),
+        retry,
     };
 
     // Build the callback and run the download entirely with the GIL released.

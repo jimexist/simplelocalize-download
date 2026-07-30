@@ -191,6 +191,34 @@ def download(
         float | None,
         typer.Option("--timeout", help="Per-request timeout in seconds."),
     ] = None,
+    retry_attempts: Annotated[
+        int | None,
+        typer.Option(
+            "--retry-attempts",
+            min=1,
+            envvar="SIMPLELOCALIZE_RETRY_ATTEMPTS",
+            show_envvar=True,
+            help="Total attempts per request, including the first (default 8).",
+        ),
+    ] = None,
+    retry_base_delay: Annotated[
+        float | None,
+        typer.Option(
+            "--retry-base-delay",
+            envvar="SIMPLELOCALIZE_RETRY_BASE_DELAY",
+            show_envvar=True,
+            help="Delay in seconds before the first retry, doubled each retry (default 1).",
+        ),
+    ] = None,
+    retry_max_delay: Annotated[
+        float | None,
+        typer.Option(
+            "--retry-max-delay",
+            envvar="SIMPLELOCALIZE_RETRY_MAX_DELAY",
+            show_envvar=True,
+            help="Ceiling in seconds on any single backoff delay (default 30).",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Warnings and errors only.")] = False,
     no_progress: Annotated[
@@ -226,8 +254,18 @@ def download(
                 base_url=base_url,
                 concurrency=concurrency,
                 request_timeout_secs=timeout,
+                retry_attempts=retry_attempts,
+                retry_base_delay_secs=retry_base_delay,
+                retry_max_delay_secs=retry_max_delay,
                 on_event=reporter.on_event if show_progress else None,
             )
+    except ValueError as err:
+        # The binding rejects negative/NaN/infinite timeouts and retry delays.
+        # Without this, a bad flag value surfaces as a rich traceback and exit 1
+        # instead of a usage error. `min=` on the options cannot cover it: NaN
+        # compares false against any bound and slips through.
+        console.print(f"[red]error:[/] {err}")
+        raise typer.Exit(EXIT_USAGE) from err
     except AuthError as err:
         console.print(f"[red]authentication failed:[/] {err}")
         raise typer.Exit(EXIT_AUTH) from err
