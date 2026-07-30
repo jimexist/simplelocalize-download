@@ -198,7 +198,11 @@ def download(
             min=1,
             envvar="SIMPLELOCALIZE_RETRY_ATTEMPTS",
             show_envvar=True,
-            help="Total attempts per request, including the first (default 8).",
+            help=(
+                "Attempts for the file-list request, including the first (default 8). "
+                "Each file download uses half this (minimum 3, never more than this "
+                "value), since that budget is paid per file."
+            ),
         ),
     ] = None,
     retry_base_delay: Annotated[

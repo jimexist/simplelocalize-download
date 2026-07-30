@@ -37,8 +37,9 @@ pub const DEFAULT_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Default ceiling on any single backoff delay.
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(30);
 
-/// Floor on attempts for an individual file, so tightening never removes retries
-/// altogether (one retry is what recovers the common single transient blip).
+/// Floor on attempts for an individual file, so halving never removes retries
+/// altogether (one retry is what recovers the common single transient blip). Only
+/// applied up to the caller's own budget — see [`RetryPolicy::for_file_downloads`].
 const MIN_FILE_ATTEMPTS: u32 = 3;
 /// Ceiling on a single per-file backoff delay. Much lower than
 /// [`DEFAULT_MAX_DELAY`] because this delay is paid once per file, not once total.
@@ -93,7 +94,12 @@ impl RetryPolicy {
     /// and reported, whereas a failed list call aborts the whole run.
     pub fn for_file_downloads(&self) -> Self {
         Self {
-            max_attempts: (self.max_attempts / 2).max(MIN_FILE_ATTEMPTS),
+            // The floor never *raises* the caller's budget: someone passing
+            // `--retry-attempts 1` means "do not retry", and silently giving files
+            // 3 attempts would contradict the flag they set.
+            max_attempts: (self.max_attempts / 2)
+                .max(MIN_FILE_ATTEMPTS)
+                .min(self.max_attempts),
             base_delay: self.base_delay,
             // `.max(base_delay)` preserves the invariant `from_overrides` enforces:
             // a ceiling below the base delay would shorten the first retry.
@@ -128,15 +134,23 @@ impl RetryPolicy {
 ///    server's hint unconditionally makes any server that sends `Retry-After`
 ///    retry *forever*, ignoring `max_attempts` entirely. Only ever replace a
 ///    delay `backon` is still offering.
-/// 2. **The hint is clamped.** An unclamped `Retry-After` lets the server choose
-///    how long an unattended run sleeps (`Retry-After: 86400` stalls CI for a
-///    day, and a near-`u64::MAX` value can overflow the sleep deadline).
+/// 2. **Only the hint is clamped.** An unclamped `Retry-After` lets the server
+///    choose how long an unattended run sleeps (`Retry-After: 86400` stalls CI for
+///    a day, and a near-`u64::MAX` value can overflow the sleep deadline). The
+///    clamp must not extend to `backon`'s own delay: `backon` adds jitter *after*
+///    its `max_delay` clamp, so its delays legitimately exceed `max_delay` (see
+///    [`RetryPolicy::builder`]). Clamping those too would flatten every delay at
+///    the ceiling to exactly `max_delay`, removing the jitter precisely where it
+///    matters most — many clients retrying a recovering server in lockstep.
 pub(crate) fn adjust_delay(
     err: &crate::error::Error,
     dur: Option<Duration>,
     max_delay: Duration,
 ) -> Option<Duration> {
-    dur.map(|computed| err.retry_after().unwrap_or(computed).min(max_delay))
+    dur.map(|computed| match err.retry_after() {
+        Some(hint) => hint.min(max_delay),
+        None => computed,
+    })
 }
 
 #[cfg(test)]
@@ -221,9 +235,20 @@ mod tests {
 
     #[test]
     fn per_file_budget_keeps_a_floor_and_respects_base_delay() {
-        // Halving must not retry-once-or-never.
-        let tiny = RetryPolicy::from_overrides(Some(2), None, None, None);
-        assert_eq!(tiny.for_file_downloads().max_attempts, MIN_FILE_ATTEMPTS);
+        // Halving must not retry-once-or-never...
+        let mid = RetryPolicy::from_overrides(Some(6), None, None, None);
+        assert_eq!(mid.for_file_downloads().max_attempts, MIN_FILE_ATTEMPTS);
+
+        // ...but the floor must never exceed what the caller asked for, or
+        // `--retry-attempts 1` ("do not retry") would silently retry files.
+        for budget in [1, 2, 3] {
+            let policy = RetryPolicy::from_overrides(Some(budget), None, None, None);
+            assert_eq!(
+                policy.for_file_downloads().max_attempts,
+                budget,
+                "a {budget}-attempt budget must not grow for files"
+            );
+        }
 
         // A base delay above the per-file ceiling must not invert the invariant.
         let slow = RetryPolicy::from_overrides(
@@ -274,6 +299,25 @@ mod tests {
         assert_eq!(
             adjust_delay(&err, Some(Duration::from_secs(4)), Duration::from_secs(30)),
             Some(Duration::from_secs(4)),
+        );
+    }
+
+    #[test]
+    fn jitter_above_the_ceiling_survives_the_hint_clamp() {
+        // `backon` adds jitter after its own `max_delay` clamp, so a computed delay
+        // legitimately exceeds `max_delay`. Clamping it here would flatten every
+        // ceiling-level delay to exactly `max_delay` and remove the jitter that
+        // keeps many clients from retrying a recovering server in lockstep.
+        let err = Error::Api {
+            status: 503,
+            msg: "boom".into(),
+            retry_after: None,
+        };
+        let jittered = Duration::from_secs(47); // within backon's [30s, 60s) range
+        assert_eq!(
+            adjust_delay(&err, Some(jittered), Duration::from_secs(30)),
+            Some(jittered),
+            "a jittered delay above max_delay must pass through unchanged"
         );
     }
 

@@ -158,6 +158,9 @@ def test_retry_after_does_not_defeat_the_attempt_budget(
     assert state.list_requests == 2, (
         f"budget defeated: {state.list_requests} requests for retry_attempts=2"
     )
+    # Checked before indexing so an unexpected success reports itself rather than
+    # surfacing as an IndexError that hides the real failure.
+    assert len(outcome) == 1, f"expected exactly one failure, got {outcome!r}"
     assert isinstance(outcome[0], sld.ApiError)
     assert outcome[0].status == 503
 
