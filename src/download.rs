@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use backon::Retryable;
@@ -20,7 +20,7 @@ use tokio::io::AsyncWriteExt;
 use crate::api::{ApiClient, ApiClientConfig, parse_retry_after};
 use crate::error::Error;
 use crate::model::{DownloadRequest, DownloadableFile};
-use crate::retry::RetryPolicy;
+use crate::retry::{RetryPolicy, adjust_delay};
 use crate::template;
 
 /// Default number of files fetched concurrently.
@@ -151,12 +151,16 @@ async fn download_all(
     log::info!("downloading {total} file(s) with concurrency {concurrency}");
 
     let concurrency = concurrency.max(1);
+    // Derived once per batch, not per file: this budget is paid by every file, so
+    // it is deliberately tighter than the client's (one-shot) list-call budget.
+    let file_retry = client.retry_policy().for_file_downloads();
     let outcomes = stream::iter(files.into_iter().map(|file| {
         let client = client.clone();
         let template = template.to_string();
         let on_event = on_event.clone();
+        let file_retry = file_retry.clone();
         async move {
-            match download_one(&client, &file, &template).await {
+            match download_one(&client, &file, &template, &file_retry).await {
                 Ok((path, bytes)) => {
                     emit(
                         &on_event,
@@ -222,6 +226,7 @@ async fn download_one(
     client: &ApiClient,
     file: &DownloadableFile,
     template: &str,
+    retry: &RetryPolicy,
 ) -> Result<(PathBuf, u64), Error> {
     let out_path = template::resolve_output_path(template, file)?;
     if let Some(parent) = out_path.parent()
@@ -232,13 +237,38 @@ async fn download_one(
             .map_err(|e| Error::io(parent, e))?;
     }
 
-    let bytes = (|| fetch_and_write(client, &file.url, &out_path))
-        .retry(client.retry_policy().builder())
-        .when(Error::is_retryable)
-        // Honor a server `Retry-After`, falling back to the computed backoff.
-        .adjust(|err, dur| err.retry_after().or(dur))
-        .await?;
-    Ok((out_path, bytes))
+    // Mirrors the list call: retries are logged at `warn` so an unattended run
+    // shows that a file was retried, not just that it eventually failed.
+    let attempts = AtomicU32::new(0);
+    let max_attempts = retry.max_attempts;
+    let max_delay = retry.max_delay;
+    let result = (|| {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        fetch_and_write(client, &file.url, &out_path)
+    })
+    .retry(retry.builder())
+    .when(Error::is_retryable)
+    // Honor a server `Retry-After`, falling back to the computed backoff.
+    .adjust(|err, dur| adjust_delay(err, dur, max_delay))
+    .notify(|err, dur| {
+        log::warn!(
+            "{} attempt {}/{max_attempts} failed, retrying in {:.1}s: {err}",
+            file.url,
+            attempts.load(Ordering::Relaxed),
+            dur.as_secs_f64(),
+        );
+    })
+    .await;
+    if let Err(err) = &result
+        && err.is_retryable()
+    {
+        log::warn!(
+            "giving up on {} after {} attempt(s): {err}",
+            file.url,
+            attempts.load(Ordering::Relaxed),
+        );
+    }
+    Ok((out_path, result?))
 }
 
 /// One fetch-and-write attempt. Streams the body to a temp file in the
@@ -523,6 +553,45 @@ mod tests {
             "{\"ok\":true}"
         );
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_5xx_on_file_exhausts_attempts_and_reports() {
+        let server = MockServer::start().await;
+        let dir = TempDir::new().unwrap();
+        mount_list(&server, &[("en", "down")]).await;
+        Mock::given(method("GET"))
+            .and(path("/files/en/down.json"))
+            .respond_with(ResponseTemplate::new(503))
+            // fast_retry() is 4 attempts, tightened to the 3-attempt per-file floor.
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let report = download(config_at(&server, &dir, 1), None).await.unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].namespace.as_deref(), Some("down"));
+        assert!(report.failed[0].error.contains("503"));
+        assert!(!dir.path().join("en/down.json").exists());
+        assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_retry_after_does_not_extend_a_file_past_its_budget() {
+        let server = MockServer::start().await;
+        let dir = TempDir::new().unwrap();
+        mount_list(&server, &[("en", "slow")]).await;
+        // A `Retry-After` must adjust the delay, never resurrect an exhausted
+        // budget — the `expect` below fails if the file retries beyond its budget.
+        Mock::given(method("GET"))
+            .and(path("/files/en/slow.json"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let report = download(config_at(&server, &dir, 1), None).await.unwrap();
+        assert_eq!(report.failed.len(), 1);
     }
 
     #[tokio::test]

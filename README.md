@@ -51,6 +51,9 @@ The API key is read from `--api-key` or the `SIMPLELOCALIZE_API_KEY` environment
 | `--base-url` | `--baseUrl` | Default `https://api.simplelocalize.io`. |
 | `--concurrency` | — | Max concurrent file downloads (default 8). |
 | `--timeout` | — | Per-request timeout in seconds. |
+| `--retry-attempts` | — | Attempts per request incl. the first (default 8). Or `SIMPLELOCALIZE_RETRY_ATTEMPTS`. |
+| `--retry-base-delay` | — | Seconds before the first retry, doubled each retry (default 1). Or `SIMPLELOCALIZE_RETRY_BASE_DELAY`. |
+| `--retry-max-delay` | — | Ceiling in seconds on a single backoff delay (default 30). Or `SIMPLELOCALIZE_RETRY_MAX_DELAY`. |
 | `-v` / `-q` | — | Verbose (debug) / quiet (warnings only) logging. |
 | `--no-progress` | — | Disable the progress bar. |
 
@@ -100,7 +103,19 @@ Exceptions: `SimpleLocalizeError` (base) → `AuthError` (has `.status`), `ApiEr
 
 - **Concurrency**: files download in parallel with a bounded limit (`--concurrency`, default 8).
 - **Retries**: connect errors, timeouts, HTTP 429 and 5xx are retried with exponential backoff and
-  full jitter, honoring `Retry-After`. Other 4xx fail fast.
+  jitter, honoring `Retry-After` (clamped to the delay ceiling, so a server cannot choose how long an
+  unattended run sleeps). Other 4xx fail fast. The default budget — 8 attempts, 1s base delay, 30s
+  ceiling — spends 91-182s of backoff before giving up (jitter is additive, so a single delay can
+  reach twice the ceiling), enough to ride out a short SimpleLocalize outage unattended; tune it with
+  the `--retry-*` flags. Each retry logs at `warn`, so an unattended run shows what was retried
+  rather than only the final failure.
+- **Per-file budget is tighter than the list call's.** The list call is one request, so it can afford
+  to be patient; each *file* pays its own budget and only `--concurrency` files run at a time, so the
+  same budget would multiply by `(files / concurrency)`. File downloads therefore use half the
+  attempts (minimum 3, but never more than `--retry-attempts` itself, so `--retry-attempts 1` really
+  means no retries) and a 5s delay ceiling, keeping a batch-wide outage to minutes instead of hours. A
+  file that exhausts its retries is reported in the summary and exits 5; it never aborts the rest of
+  the batch.
 - **Atomic writes**: each file streams to a temp file in the destination directory and is renamed
   into place, so a crash never leaves a half-written translation file.
 - **Partial-failure reporting**: a failed file doesn't abort the batch; every file is attempted and

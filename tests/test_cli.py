@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from simplelocalize_download.cli import app
+from simplelocalize_download.cli import EXIT_USAGE, app
 from tests.conftest import MockState
 
 runner = CliRunner()
@@ -87,6 +87,29 @@ def test_missing_api_key_is_usage_error(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.delenv("SIMPLELOCALIZE_API_KEY", raising=False)
     result = runner.invoke(app, ["download", "--download-path", _path_template(tmp_path)])
     assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_invalid_retry_delay_is_usage_error(tmp_path: Path, value: str) -> None:
+    """A bad --retry-* value exits 2, not a traceback.
+
+    `min=` on the option cannot cover this: NaN compares false against every
+    bound, so the binding's ValueError is what actually rejects it.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "download",
+            "--api-key",
+            "k",
+            "--download-path",
+            _path_template(tmp_path),
+            "--retry-base-delay",
+            value,
+        ],
+    )
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "Traceback" not in result.output
 
 
 def test_non_json_format_rejected(tmp_path: Path) -> None:
