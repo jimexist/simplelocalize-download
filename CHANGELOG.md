@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.2]
+
 ### Fixed
 
 - A server-supplied `Retry-After` no longer overrides the attempt budget. `backon` signals "budget
@@ -75,6 +77,7 @@ bindings and a Typer CLI.
 - Supports the `download` command with the `single-language-json` format only. See the README for
   the full list of what is intentionally out of scope.
 
-[Unreleased]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jimexist/simplelocalize-download/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jimexist/simplelocalize-download/releases/tag/v0.1.0
